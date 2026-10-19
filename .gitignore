@@ -1,0 +1,44 @@
+# Rust
+target/
+
+# Node
+node_modules/
+.turbo/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Tauri
+apps/*/src-tauri/target/
+apps/*/src-tauri/gen/schemas/
+
+# Models and large artifacts are never committed
+models/
+*.gguf
+*.onnx
+*.litertlm
+*.bin
+!packages/eval/fixtures/**/*.bin
+
+# Synthetic fixture audio is regenerated with tools/fixture-tts; only the
+# short CI smoke clip is committed.
+packages/eval/fixtures/audio/*.wav
+!packages/eval/fixtures/audio/smoke.wav
+
+# Local data (patient audio and notes must never be committed)
+*.db
+*.sqlite
+recordings/
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# The website is served from its built folder (website/README.md).
+!website/dist/

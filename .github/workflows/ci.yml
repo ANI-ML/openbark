@@ -1,0 +1,244 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "24.22.0"
+
+jobs:
+  js:
+    name: UI (typecheck + tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r run typecheck
+      - run: pnpm -r run test
+
+  linux:
+    name: Engine (Linux) + offline e2e
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages (Tauri webview, libclang)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libclang-dev cmake libasound2-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-linux-
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: bash scripts/ci/check-network.sh
+      - name: Install scripts parse
+        run: for f in install/*.sh install/*.command; do bash -n "$f"; done
+      - run: cargo build --release -p os-cli
+      - name: Single ggml / no whisper / one ONNX Runtime (M0-5)
+        run: bash scripts/ci/check-symbols.sh target/release/openbark
+      - name: Restore models
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: ~/models
+          key: models-${{ hashFiles('engine/os-models/catalog.json') }}-e2b
+      - name: Download models (network allowed here only)
+        if: steps.models.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/models
+          export OPENBARK_MODELS_DIR=~/models
+          for id in silero-vad parakeet-tdt-0.6b-v3-int8 pyannote-segmentation-3.0 wespeaker-en-resnet34-lm gemma-4-e2b-it-q4_0; do
+            target/release/openbark models pull "$id"
+          done
+      - name: Offline end-to-end (M0-2, M0-4, M0-6)
+        run: |
+          # Ubuntu 24.04 blocks unprivileged user namespaces (AppArmor), which
+          # e2e-offline.sh needs for `unshare -rn` (a run with no network at all).
+          # Lift that restriction on the runner only; the test itself stays offline.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          export OPENBARK_MODELS_DIR=~/models
+          target/release/openbark models verify
+          bash scripts/ci/e2e-offline.sh target/release/openbark smoke gemma-4-e2b-it-q4_0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-linux
+          path: target/e2e
+
+  mlx-linux:
+    # ADR-0025: MLX on Linux's CPU ("test mode", OPENBARK_MLX_DEV=1). The pack
+    # installs through OpenBark's downloader, a 0.6B MLX model comes through
+    # the Hugging Face path, and a fixture is drafted with no network at all
+    # and checked against the SOAP schema. Then both are removed again.
+    name: MLX end to end (Linux CPU, test mode)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages (libclang, ALSA)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev cmake libasound2-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-mlx-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-mlx-linux-
+            cargo-linux-
+      # Test mode (OPENBARK_MLX_DEV) is honoured only by builds with this feature.
+      - run: cargo build --release -p os-cli --features mlx-test-mode
+      - name: Every schema OpenBark drafts against (golden llguidance check)
+        run: cargo run --release -p os-engine --example write_schemas -- target/schemas
+      - name: MLX end to end
+        run: |
+          # `unshare -rn` (a draft with no network at all) needs unprivileged
+          # user namespaces, which Ubuntu 24.04's AppArmor blocks by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The pack is downloaded and verified against the lock on every run
+          # (no cached unpacked pack), then the real-worker tests run on it.
+          export OPENBARK_GOLDEN_SCHEMAS="$PWD/target/schemas"
+          export MLX_WORKER_TESTS=1
+          bash scripts/ci/mlx-e2e.sh target/release/openbark target/mlx-e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Fixture text only: no patient data exists on CI.
+          name: mlx-e2e-linux
+          path: target/mlx-e2e/out
+
+  mlx-macos:
+    # ADR-0025 on a real Mac: the macOS pack from the lock, its check under
+    # sandbox-exec (Metal when the runner has it, else MLX's CPU device, and
+    # the summary says which), then a draft with the 0.6B model. GitHub's Mac
+    # runners may expose no usable Metal device, so this job may fail without
+    # failing the run.
+    name: MLX smoke (macOS arm64)
+    runs-on: macos-15
+    continue-on-error: true
+    env:
+      OPENBARK_MODELS_DIR: ${{ github.workspace }}/target/mlx/models
+      OPENBARK_ENGINES_DIR: ${{ github.workspace }}/target/mlx/engines
+      OPENBARK_SESSIONS_DIR: ${{ github.workspace }}/target/mlx/sessions
+      OPENBARK_LOCATIONS_FILE: ${{ github.workspace }}/target/mlx/locations.json
+      OPENBARK_HF_TOKEN_FILE: ${{ github.workspace }}/target/mlx/hf-token.obk
+      OPENBARK_DATA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      OPENBARK_LOG: info
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-
+      - run: cargo build --release -p os-cli --features metal
+      - name: Install the MLX pack and check it (Metal, else the CPU)
+        run: |
+          mkdir -p target/mlx
+          bin=target/release/openbark
+          $bin mlx status
+          if $bin mlx install > target/mlx/check.json; then
+            echo "MLX pack check passed on the default device." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The check failed on the default device; trying MLX's CPU device (OPENBARK_MLX_DEVICE=cpu)." >> "$GITHUB_STEP_SUMMARY"
+            echo "OPENBARK_MLX_DEVICE=cpu" >> "$GITHUB_ENV"
+            OPENBARK_MLX_DEVICE=cpu $bin mlx check > target/mlx/check.json
+          fi
+          cat target/mlx/check.json
+          python3 -c "import json; d=json.load(open('target/mlx/check.json')); print('device:', d['device'], '| metal:', d['metal'], '| versions:', d['versions'])" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The sandbox profile blocks the network on this runner
+        run: |
+          python=$(python3 -c "import json,subprocess; print(json.loads(subprocess.check_output(['target/release/openbark','mlx','status']))['pack_dir'])")/python/bin/python3
+          if /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' "$python" -I -c \
+            "import socket; socket.create_connection(('huggingface.co', 443), timeout=5)"; then
+            echo "sandbox-exec let the pack's Python reach the network"; exit 1
+          fi
+          echo "sandbox-exec blocked the network, as expected."
+      - name: Draft with mlx-community/Qwen3-0.6B-4bit under sandbox-exec
+        run: |
+          bin=target/release/openbark
+          $bin models add-hf mlx-community/Qwen3-0.6B-4bit @mlx
+          $bin models pull hf:mlx-community/Qwen3-0.6B-4bit/@mlx
+          unset OPENBARK_MLX_SANDBOX
+          $bin note --input scripts/ci/fixtures/mlx-smoke.jsonl --llm hf:mlx-community/Qwen3-0.6B-4bit/@mlx \
+            --template soap --max-tokens 1024 --json target/mlx/note.json 2> target/mlx/note.log > target/mlx/note.md
+          if grep -q "sandbox-exec is missing" target/mlx/note.log; then echo "the worker ran without sandbox-exec"; exit 1; fi
+          cat target/mlx/note.md
+          python3 scripts/ci/validate-note.py packages/templates/soap/schema.json target/mlx/note.json
+          python3 -c "import json; s=json.load(open('target/mlx/note.json'))['stats']; print('completion tokens:', s.get('completion_tokens'), '| tokens/s:', s.get('tokens_per_second'))" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove the model and the pack
+        run: |
+          target/release/openbark models rm hf:mlx-community/Qwen3-0.6B-4bit/@mlx
+          target/release/openbark mlx remove
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mlx-macos
+          path: |
+            target/mlx/check.json
+            target/mlx/note.json
+            target/mlx/note.md
+            target/mlx/note.log
+
+  windows:
+    name: Engine (Windows x64, CPU build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-windows-
+      - name: libclang (bindgen)
+        run: choco install llvm -y --no-progress
+      - run: cargo test --workspace --exclude openbark-desktop
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      - run: cargo build --release -p os-cli
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+  macos:
+    name: Engine (macOS arm64, Metal build)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-
+      - run: cargo test --workspace --exclude openbark-desktop
+      - run: cargo build --release -p os-cli --features metal
+      - name: Single ggml / no whisper (M0-5)
+        run: bash scripts/ci/check-symbols.sh target/release/openbark

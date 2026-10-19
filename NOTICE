@@ -1,0 +1,58 @@
+OpenBark, an open-source veterinary scribe
+Copyright 2026 ANI.ML Health Inc. (Toronto, Ontario, Canada) and OpenBark contributors
+Built by the ANI.ML Health team (https://www.animl.health).
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party models that OpenBark can download are not distributed in this
+repository. When a model is offered in the app's catalog, its license and any
+required attribution are shown before download. Attributions required by
+models in the default catalog:
+
+- Gemma 4 models, by Google, licensed under Apache-2.0.
+  "Gemma" is a trademark of Google LLC. OpenBark is not affiliated with or
+  endorsed by Google.
+
+- Parakeet TDT 0.6B v3, by NVIDIA, licensed under CC-BY-4.0.
+  https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+  ONNX export by the k2-fsa/sherpa-onnx project.
+
+- Whisper large-v3-turbo, by OpenAI, licensed under MIT.
+  ONNX export by the k2-fsa/sherpa-onnx project.
+
+- Silero VAD, by the Silero Team, licensed under MIT.
+
+- pyannote/segmentation-3.0, by CNRS (Herve Bredin), licensed under MIT.
+  ONNX export by the k2-fsa/sherpa-onnx project.
+
+- WeSpeaker VoxCeleb ResNet34-LM, by the WeNet community, licensed under
+  CC-BY-4.0.
+
+The optional GPU speech pack (Windows, NVIDIA) is downloaded on the user's
+request and is not distributed here: ONNX Runtime (MIT, by Microsoft, in the
+CUDA build published by k2-fsa/sherpa-onnx) and NVIDIA's CUDA runtime, cuBLAS
+and cuDNN libraries, which are NVIDIA's software under NVIDIA's license and
+are fetched from NVIDIA's own packages after the user accepts that license.
+
+The optional MLX engine pack (Mac with Apple silicon, macOS 14 or later) is
+downloaded on the user's request and is not distributed here: a standalone
+CPython build from the python-build-standalone project (Python under the PSF
+License, build scripts MPL-2.0), and the Python packages MLX and mlx-lm (MIT,
+by Apple Inc.), llguidance (MIT, by Microsoft Corporation), Transformers and
+Tokenizers (Apache-2.0, by Hugging Face) and their dependencies, under MIT,
+BSD, Apache-2.0, ISC, PSF-2.0, MPL-2.0 (tqdm, with MIT), CNRI-Python (regex,
+with Apache-2.0) and, in NumPy, also 0BSD, Zlib and CC0-1.0 terms; each
+package's license is listed in docs/mlx-pack-pins.md.
+
+Third-party software compiled into or shipped with the app and installers,
+each under its own license (full license texts are in the respective projects):
+
+- llama.cpp and ggml (MIT), by the ggml authors. https://github.com/ggml-org/llama.cpp
+- sherpa-onnx (Apache-2.0), by the k2-fsa project. https://github.com/k2-fsa/sherpa-onnx
+- ONNX Runtime (MIT), by Microsoft Corporation. https://github.com/microsoft/onnxruntime
+- Tauri (Apache-2.0 or MIT), by the Tauri Programme within The Commons Conservancy.
+- React (MIT), by Meta Platforms, Inc. and affiliates.
+- Other Rust crates and npm packages, under MIT, Apache-2.0, BSD or similar
+  permissive licenses, as listed in Cargo.lock and pnpm-lock.yaml.
+
+Fonts bundled with the app: Manrope (Copyright 2019 The Manrope Project Authors) and JetBrains Mono (Copyright 2020 The JetBrains Mono Project Authors), both under the SIL Open Font License 1.1; see packages/ui/src/fonts/OFL.txt. Icons: Lucide (ISC License).
