@@ -26,9 +26,11 @@ SRC = os.path.join(SITE, "src")
 DIST = os.path.join(SITE, "dist")
 
 PRODUCT = "OpenBark"
-# The source repository, linked from the header, footer and landing page.
-# After changing it, rebuild and re-render website/public/og-image.png
-# (SOURCE_PUBLIC=1 node e2e/brand-images.mjs --og).
+# The source repository. Until ANI-ML/openbark is public, leave this as None:
+# the site then calls OpenBark free (not open source), says the code isn't
+# public yet, and shows no Source code links. Once the repository is public,
+# set it to "https://github.com/ANI-ML/openbark", rebuild, and re-render
+# website/public/og-image.png (SOURCE_PUBLIC=1 node e2e/brand-images.mjs --og).
 SOURCE_URL = "https://github.com/ANI-ML/openbark"
 # The account portal (portal.html) is always built. Its Sign in links in the
 # header and footer appear only once Supabase is set up (supabase/README.md):
@@ -218,6 +220,33 @@ LOST = f"""<section class="lost">
 """
 
 
+# The contents list marks the section in view (aria-current="location"), like
+# a scroll index. An observer, not a scroll handler: nothing runs per frame.
+TOC_SCRIPT = """<script>
+(function () {
+  var toc = document.querySelector(".fx-toc");
+  if (!toc || !window.IntersectionObserver) return;
+  var links = {};
+  toc.querySelectorAll('a[href^="#"]').forEach(function (a) { links[a.getAttribute("href").slice(1)] = a; });
+  var seen = {};
+  var mark = function () {
+    var ids = Object.keys(links), current = null;
+    for (var i = 0; i < ids.length; i++) if (seen[ids[i]]) { current = ids[i]; break; }
+    if (!current) return; // Between sections: keep the last mark.
+    ids.forEach(function (id) {
+      if (id === current) links[id].setAttribute("aria-current", "location");
+      else links[id].removeAttribute("aria-current");
+    });
+  };
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) { seen[en.target.id] = en.isIntersecting; });
+    mark();
+  }, { rootMargin: "-96px 0px -55% 0px" });
+  Object.keys(links).forEach(function (id) { var el = document.getElementById(id); if (el) io.observe(el); });
+})();
+</script>"""
+
+
 def stat_block(stats, limit=8):
     """Value and plain label per tile; where each number comes from sits in one closed list below."""
     shown = stats[:limit]
@@ -300,6 +329,7 @@ def features_body(content):
   <div>{"".join(sections)}</div>
 </div>
 {together}
+{TOC_SCRIPT}
 <script>
 (function () {{
   var q = document.getElementById("fx-q");
@@ -331,6 +361,7 @@ def history_body(history):
     nxt = "".join(f'<li><p>{e(i["text"])}</p>{how_we_know("", i.get("evidence", ""))}</li>' for i in history["next"])
     toc = "".join(f'<a href="#{e(m["id"])}"><span>{e(m["name"])}</span><span class="count">{len(m["entries"])}</span></a>' for m in history["milestones"])
     groups = []
+    latest = True  # The newest entry is filled on the timeline and marked Latest.
     for m in history["milestones"]:
         entries = []
         for en in m["entries"]:
@@ -340,10 +371,12 @@ def history_body(history):
                 + f'</p>{how_we_know("", i.get("evidence", ""))}</li>'
                 for i in en["items"]
             )
+            badge = '<span class="status" data-s="signed">Latest</span>' if latest else ""
             entries.append(
-                f'<article class="hx-entry"><p class="hx-date"><time datetime="{e(en["date"])}">{e(en["date"])}</time></p>'
+                f'<article class="hx-entry{" is-latest" if latest else ""}"><p class="hx-date"><time datetime="{e(en["date"])}">{e(en["date"])}</time>{badge}</p>'
                 f'<div><h3>{e(en["title"])}</h3><p class="hx-summary">{e(en["summary"])}</p><ul class="hx-items">{items}</ul></div></article>'
             )
+            latest = False
         groups.append(
             f'<section class="hx-group" id="{e(m["id"])}"><h2>{e(m["name"])}<span>{e(m["tagline"])}</span></h2>{"".join(entries)}</section>'
         )
@@ -366,7 +399,7 @@ def history_body(history):
   <nav class="fx-toc" aria-label="Milestones">{toc}</nav>
   <div>{"".join(groups)}</div>
 </div>
-"""
+{TOC_SCRIPT}"""
 
 
 def changelog_md(history):

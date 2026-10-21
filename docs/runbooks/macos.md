@@ -29,10 +29,10 @@ cargo build --release -p os-cli --features metal     # first build ≈ 10–15 m
 scripts/bench.sh            # pulls models (~13 GB), runs E4B and 12B, saves JSON
 ```
 
-Each run prints a one-line summary: audio length, speech-to-text time, LLM speed, total wall time, and whether the faithfulness check passed. The results land in `docs/perf/results/<your-mac>-<date>/`. To send them back, commit them on a branch:
+Each run prints a one-line summary: audio length, speech-to-text time, LLM speed, total wall time, and whether the faithfulness check passed. The results land in `docs/perf/results/<label>-<date>/` (set `BENCH_NAME` first, for example `BENCH_NAME=m3-pro-36gb`). To send them back, commit them on a branch:
 
 ```bash
-git switch -c perf/$(hostname -s) && git add docs/perf/results && git commit -m "perf: M0 bench on $(sysctl -n machdep.cpu.brand_string)" && git push -u origin HEAD
+git switch -c "perf/$BENCH_NAME" && git add docs/perf/results && git commit -m "perf: M0 bench on $(sysctl -n machdep.cpu.brand_string)" && git push -u origin HEAD
 ```
 
 Or paste the summary lines into a GitHub issue.
@@ -64,6 +64,15 @@ Check, in this order:
 4. **Test "Delete my data" only in a separate macOS user account that has no real data** (System Settings > Users & Groups > Add User). Install OpenBark there, open it once, then uninstall with **Delete my data**, then **Delete**. Expect its `Application Support/OpenBark` folder and its keychain item **OpenBark** (Keychain Access) to be gone. Never try this in the account that holds the clinic's encounters.
 
 Note anything that looks wrong (dialog wording, icon positions, a second password prompt) in a GitHub issue.
+
+## 6. Quit and replay (the two 0.1.1 bugs)
+
+0.1.1 crashed on Cmd-Q after a note had been drafted (a "quit unexpectedly" report naming `ggml_abort` and `ggml_metal_rsets_free`), and recordings showed an error instead of playing in Review. Both are checked on GitHub's Macs by the **Quit and replay checks** workflow (`.github/workflows/macos-repro.yml`). On your Mac, with a build that has the fix:
+
+1. Open OpenBark and draft a note for any visit, so the note model is loaded.
+2. Press Cmd-Q while the model is loaded, and once more in the middle of a draft. Expect OpenBark to close within a few seconds with no "quit unexpectedly" dialog.
+3. Open the visit again. In Review, play the recording, drag the slider near the end, and let it play out. Try a long visit (over 30 minutes) and an imported file too.
+4. If either fails, send the crash report from **Console > Crash Reports** (or `~/Library/Logs/DiagnosticReports/OpenBark-*.ips`) and say which visit and how long its recording is.
 
 ## If something fails
 
