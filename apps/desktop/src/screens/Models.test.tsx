@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext, loadSettings, type Ctx } from "../context";
 import * as engine from "../engine";
-import { Models } from "./Models";
+import { Models, plainModelName } from "./Models";
 
 vi.mock("../engine", async (importOriginal) => {
   const real = await importOriginal<typeof import("../engine")>();
@@ -588,5 +588,170 @@ describe("Hugging Face sheet", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Browse Hugging Face" }));
     fireEvent.click(await screen.findByRole("button", { name: "Hugging Face token" }));
     expect(await screen.findByLabelText("Hugging Face token")).toBeTruthy();
+  });
+});
+
+// ---- the phone profile (ADR-0018 section 10) ------------------------------------
+
+const PHONE_ROWS: engine.ModelRow[] = [
+  row({ id: "gemma-4-e2b-it-q4_0", name: "Gemma 4 E2B", size_bytes: 3_349_516_256 }),
+  row({ id: "qwen3-1.7b-q4_k_m", name: "Qwen3 1.7B", size_bytes: 1_107_409_472, publisher: "unsloth" }),
+  row({
+    id: "gemma-4-e4b-it-q4_0",
+    name: "Gemma 4 E4B",
+    fit: "wont_fit",
+    phone_note: "Too large for this iPhone (8 GB): 5.2 GB. Models up to 3.5 GB fit.",
+  }),
+  row({ id: "parakeet", name: "Parakeet TDT 0.6B v3", slot: "stt", installed: true, remove: "needed" }),
+];
+
+function phoneCtx(tier: number | null = 8): Ctx {
+  const c = ctx("ios");
+  c.status = {
+    platform: "ios",
+    profile: "ios",
+    mobile_tier: tier,
+    default_llm: tier ? "gemma-4-e2b-it-q4_0" : "",
+    hardware: null,
+  } as unknown as engine.Status;
+  c.settings = { ...c.settings, llm: "gemma-4-e2b-it-q4_0" };
+  return c;
+}
+
+describe("Models on a phone", () => {
+  beforeEach(() => {
+    mocked.models.mockResolvedValue(PHONE_ROWS);
+  });
+
+  it("shows the phone's tier and hides the MLX, GPU and add-from-computer parts", async () => {
+    show(phoneCtx());
+    await screen.findByText("Gemma 4 E2B", { selector: "td > div" });
+    expect(screen.getByTestId("phone-tier").textContent).toContain("(8 GB)");
+    expect(screen.queryByRole("button", { name: "Add from this computer" })).toBeNull();
+    expect(screen.queryByText("What the model names mean")).toBeNull();
+    expect(mocked.mlxStatus).not.toHaveBeenCalled();
+    expect(mocked.gpuStatus).not.toHaveBeenCalled();
+    expect(screen.getByRole("columnheader", { name: "On this phone" })).toBeTruthy();
+  });
+
+  it("says a model is too large for this iPhone and won't download it", async () => {
+    show(phoneCtx());
+    await screen.findByText("Gemma 4 E4B", { selector: "td > div" });
+    const e4b = rowOf("Gemma 4 E4B");
+    expect(within(e4b).getByText("Too large for this iPhone (8 GB): 5.2 GB. Models up to 3.5 GB fit.")).toBeTruthy();
+    const dl = within(e4b).getByRole("button", { name: /Download/ }) as HTMLButtonElement;
+    expect(dl.disabled).toBe(true);
+    const e2b = within(rowOf("Gemma 4 E2B")).getByRole("button", { name: /Download/ }) as HTMLButtonElement;
+    expect(e2b.disabled).toBe(false);
+  });
+
+  it("says a phone under 6 GB can't write notes", async () => {
+    show(phoneCtx(null));
+    await screen.findByText("Gemma 4 E2B", { selector: "td > div" });
+    expect(screen.getByTestId("phone-tier").textContent).toBe(
+      "OpenBark needs an iPhone with 6 GB of memory or more to write notes on the phone.",
+    );
+  });
+
+  it("browses phone-sized GGUFs only, and lists what's held back with the reason", async () => {
+    const model: engine.HubModel = {
+      id: "unsloth/gemma-4-E4B-it-GGUF",
+      publisher: "unsloth",
+      downloads: 10,
+      likes: 0,
+      license: "apache-2.0",
+      license_class: "permissive",
+      gated: false,
+      last_modified: null,
+      mlx: false,
+    } as engine.HubModel;
+    mocked.hubSearch.mockResolvedValue([model]);
+    mocked.hubRepo.mockResolvedValue({
+      repo: { model, revision: "a".repeat(40), access: "open", gated_kind: null, base_model: null },
+      files: [],
+      mlx: null,
+      held: [
+        {
+          path: "gemma-4-E4B-it-Q4_K_M.gguf",
+          size_bytes: 4_977_171_584,
+          reason: "Too large for this iPhone (8 GB): 5.0 GB. Models up to 3.5 GB fit.",
+        },
+        {
+          path: "gemma-4-E4B-it-BF16.gguf",
+          size_bytes: 15_053_097_856,
+          reason: "Not offered on this iPhone (8 GB): phones need a 3 to 5-bit build (Q4_K_M or Q4_0, for example).",
+        },
+      ],
+      phone_note:
+        "No file in this repository fits this iPhone (8 GB). Models up to 3.5 GB and 4.5B parameters, in a 3 to 5-bit build, fit.",
+    });
+    show(phoneCtx());
+    fireEvent.click(await screen.findByRole("button", { name: "Browse Hugging Face" }));
+    expect(
+      await screen.findByText(
+        "Small note-writing models in GGUF format that fit this iPhone. Searching contacts huggingface.co; nothing else leaves this iPhone.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("Only show MLX-optimized models")).toBeNull();
+    expect(screen.getByRole("button", { name: "Qwen3 1.7B" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Gemma 4 12B" })).toBeNull();
+    fireEvent.click(await screen.findByText("unsloth/gemma-4-E4B-it-GGUF", { selector: ".hub-name" }));
+    expect((await screen.findByTestId("phone-note")).textContent).toContain("No file in this repository fits");
+    expect(screen.getByText("Not offered on this iPhone (2)")).toBeTruthy();
+    expect(screen.getByText("Too large for this iPhone (8 GB): 5.0 GB. Models up to 3.5 GB fit.")).toBeTruthy();
+    // Held files can't be downloaded, and no "GGUF builds of this model" are fetched for them.
+    expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+    expect(mocked.hubAlternatives).not.toHaveBeenCalled();
+  });
+});
+
+// ---- phone width (ADR-0027): stacked rows, plain names ---------------------------
+
+describe("plainModelName", () => {
+  it("keeps the name a person picks a model by, and the build details apart", () => {
+    expect(plainModelName("Gemma 4 E4B instruct (QAT Q4_0)")).toEqual({ name: "Gemma 4 E4B", detail: "QAT Q4_0" });
+    expect(plainModelName("Qwen3 235B Q4_K_M")).toEqual({ name: "Qwen3 235B", detail: "Q4_K_M" });
+    expect(plainModelName("Qwen3 0.6B 4bit")).toEqual({ name: "Qwen3 0.6B", detail: "4bit" });
+    expect(plainModelName("Qwen3-1.7B-4bit")).toEqual({ name: "Qwen3-1.7B", detail: "4bit" });
+    expect(plainModelName("Parakeet TDT 0.6B v3 (int8)")).toEqual({ name: "Parakeet TDT 0.6B v3", detail: "int8" });
+    expect(plainModelName("llama-3.2-3b")).toEqual({ name: "llama-3.2-3b", detail: "" });
+    expect(plainModelName("Silero VAD")).toEqual({ name: "Silero VAD", detail: "" });
+    expect(plainModelName("Q4_K_M")).toEqual({ name: "Q4_K_M", detail: "" });
+  });
+});
+
+describe("Models at phone width", () => {
+  beforeEach(() => {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: q === "(max-width: 640px)",
+      media: q,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    mocked.models.mockResolvedValue([
+      ...PHONE_ROWS,
+      row({ id: "qwen3-q4km", name: "Qwen3 4B instruct (Q4_K_M)", size_bytes: 2_500_000_000, publisher: "unsloth" }),
+    ]);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("stacks the catalog with plain names and sizes, no table", async () => {
+    show(phoneCtx());
+    const name = await screen.findByText("Qwen3 4B", { selector: ".model-item-name" });
+    expect(document.querySelector(".ob-table")).toBeNull();
+    const item = name.closest("li") as HTMLElement;
+    expect(within(item).getByText("Q4_K_M")).toBeTruthy();
+    expect(within(item).getByText("2.5 GB")).toBeTruthy();
+    expect(within(item).getByRole("button", { name: "Download (2.5 GB)" })).toBeTruthy();
+    // A too-large model still says why, and still can't download.
+    const e4b = screen.getByText("Gemma 4 E4B", { selector: ".model-item-name" }).closest("li") as HTMLElement;
+    expect(within(e4b).getByText("Too large for this iPhone (8 GB): 5.2 GB. Models up to 3.5 GB fit.")).toBeTruthy();
+    expect((within(e4b).getByRole("button", { name: /Download/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("makes Browse Hugging Face a secondary button", async () => {
+    show(phoneCtx());
+    const browse = await screen.findByRole("button", { name: "Browse Hugging Face" });
+    expect(browse.getAttribute("data-variant")).toBe("default");
   });
 });
