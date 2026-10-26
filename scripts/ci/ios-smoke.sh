@@ -29,7 +29,8 @@ if [ "$draft" = 1 ]; then
   bash "$repo/scripts/ci/fetch-test-gguf.sh" "$gguf" qwen2.5-0.5b
 fi
 
-# The newest available iPhone simulator.
+# The newest available Face ID iPhone simulator (safe areas at the top and
+# bottom show in the screenshot), or the newest iPhone if there is none.
 udid="$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
 devs = json.load(sys.stdin)["devices"]
@@ -39,7 +40,7 @@ for runtime, items in devs.items():
         continue
     for d in items:
         if d.get("isAvailable") and d["name"].startswith("iPhone"):
-            key = (runtime, d["name"])
+            key = (runtime, "SE" not in d["name"], d["name"])
             if best is None or key > best[0]:
                 best = (key, d["udid"])
 print(best[1] if best else "")
@@ -162,6 +163,22 @@ if downloaded:
 if problems:
     sys.exit("Bundled speech models: " + "; ".join(problems))
 print("Bundled speech models: all four found in the app, read-only; nothing downloaded.")
+EOF
+
+# Encrypted sync: a build made with OPENBARK_SYNC_PREVIEW (TestFlight's) must
+# offer it; otherwise Settings > Sync says it isn't in this version.
+python3 - "$support/smoke-sync.json" "${OPENBARK_SYNC_PREVIEW:-}" <<'EOF'
+import json, sys
+path, preview = sys.argv[1:3]
+try:
+    s = json.load(open(path))
+except (OSError, ValueError) as e:
+    sys.exit(f"the app didn't report its sync status ({e})")
+print(f"Encrypted sync on the simulator: {json.dumps(s)[:300]}")
+if preview and not s.get("available"):
+    sys.exit(f"Encrypted sync should be available in a preview build: {s.get('reason')} {s.get('detail') or ''}")
+if not preview and s.get("reason") != "not_in_this_version":
+    sys.exit("Encrypted sync should say it isn't in this version")
 EOF
 
 # The transcription: the app writes "ok: <first words>" or "error: <why>".

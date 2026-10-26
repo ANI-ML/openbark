@@ -47,7 +47,8 @@ jobs:
         github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') ||
         contains(github.event.head_commit.message, '[ios-testflight]')
       )
-    runs-on: macos-15
+    # App Store Connect only accepts builds made with the iOS 26 SDK or later.
+    runs-on: macos-26
     timeout-minutes: 90
     environment: testflight
     concurrency:
@@ -62,6 +63,13 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
     steps:
+      - name: Xcode 26 (App Store Connect needs the iOS 26 SDK)
+        run: |
+          xc=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$xc" ] || { echo "::error::No Xcode 26 on this runner"; exit 1; }
+          sudo xcode-select -s "$xc/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
       - name: Signing secrets present?
         id: secrets
         run: |
@@ -134,6 +142,8 @@ jobs:
           # The phone records, transcribes and (opt-in, 8 GB and up) drafts:
           # stt and inference unless other features are named.
           [ -n "$features" ] || features=stt,inference
+          # Xcode doesn't pass OPENBARK_SYNC_PREVIEW on to cargo: ask for the feature.
+          features="$features,sync-preview"
           args=(tauri ios build --export-method app-store-connect --ci --build-number "${{ github.run_number }}")
           [ -n "$features" ] && args+=(--features "$features")
           pnpm "${args[@]}"

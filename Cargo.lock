@@ -1841,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "fixture-tts"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3694,6 +3694,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
  "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -3955,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "openbark-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "os-app",
  "os-engine",
@@ -4040,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "os-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "os-asr",
@@ -4059,9 +4060,12 @@ dependencies = [
 
 [[package]]
 name = "os-asr"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
+ "block2",
  "cpal",
+ "objc2",
+ "objc2-avf-audio",
  "opus-decoder",
  "serde",
  "sherpa-onnx",
@@ -4073,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "os-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4098,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "os-connect"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.23.1",
  "dirs",
@@ -4117,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "os-diar"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "os-asr",
  "serde",
@@ -4126,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "os-engine"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "apple-native-keyring-store",
  "argon2",
@@ -4156,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "os-hub"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "hex",
@@ -4182,7 +4186,7 @@ dependencies = [
 
 [[package]]
 name = "os-llm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "jsonschema",
  "llama-cpp-2",
@@ -4196,7 +4200,7 @@ dependencies = [
 
 [[package]]
 name = "os-models"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bzip2 0.5.2",
  "dirs",
@@ -4218,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "os-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "chrono",
@@ -4239,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "os-sync"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "argon2",
  "base64 0.23.1",
