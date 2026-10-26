@@ -89,19 +89,77 @@ async fn work<T: Send + 'static>(
 
 #[tauri::command]
 fn status(app: State<'_, AppState>) -> os_app::Status {
+    let status = app.status();
     // The iOS check job's smoke test (ADR-0018 section 8): the interface asks
     // for the status as soon as the WebView has loaded it, so a marker in the
-    // data folder proves the WebView ran the app. Only with OPENBARK_SMOKE=1.
+    // data folder proves the WebView ran the app. Next to it, the models the
+    // engine found (the speech models that come with the iPhone app, ADR-0018
+    // section 10), written first so the marker means both are there. Only
+    // with OPENBARK_SMOKE=1.
     if std::env::var("OPENBARK_SMOKE").as_deref() == Ok("1") {
         let dir = os_engine::session::default_root();
-        let marker = dir.parent().unwrap_or(&dir).join("smoke-webview.txt");
-        if let Err(e) = std::fs::create_dir_all(marker.parent().unwrap_or(&dir))
-            .and_then(|_| std::fs::write(&marker, env!("CARGO_PKG_VERSION")))
+        let base = dir.parent().unwrap_or(&dir).to_path_buf();
+        let models = serde_json::to_string_pretty(&status.models).unwrap_or_default();
+        if let Err(e) = std::fs::create_dir_all(&base)
+            .and_then(|_| std::fs::write(base.join("smoke-models.json"), models))
+            .and_then(|_| std::fs::write(base.join("smoke-webview.txt"), env!("CARGO_PKG_VERSION")))
         {
             tracing::warn!(error = %e, "couldn't write the smoke-test marker");
         }
+        // The transcription check: the smoke test puts a short synthetic clip
+        // in the data folder; transcribe it once with the built-in models and
+        // write "ok: <first words>" or "error: <why>" for the script. When it
+        // also put a tiny test GGUF there, draft a SOAP note from that
+        // transcript and write "ok: <n> sections" or "error: <why>".
+        static TRANSCRIBING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let clip = base.join("smoke-input.wav");
+        if clip.is_file() && !TRANSCRIBING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let app = app.inner().clone();
+            let out = base.join("smoke-transcript.txt");
+            let gguf = base.join("smoke-llm.gguf");
+            let note_out = base.join("smoke-note.txt");
+            std::thread::spawn(move || {
+                let transcript = app.smoke_transcript(&clip);
+                let words: Vec<String> = transcript
+                    .as_ref()
+                    .map(|t| {
+                        t.segments.iter().flat_map(|s| s.text.split_whitespace()).map(String::from).collect()
+                    })
+                    .unwrap_or_default();
+                let line = match &transcript {
+                    Ok(_) if !words.is_empty() => {
+                        format!("ok: {}", words.iter().take(12).cloned().collect::<Vec<_>>().join(" "))
+                    }
+                    Ok(_) => "error: the transcript is empty".to_string(),
+                    Err(e) => format!("error: {}", e.0),
+                };
+                tracing::info!(result = %line, "smoke-test transcription");
+                if let Err(e) = std::fs::write(&out, line) {
+                    tracing::warn!(error = %e, "couldn't write the smoke-test transcript");
+                }
+                if let (Ok(t), true) = (&transcript, gguf.is_file()) {
+                    // Where the draft is, for the script when it runs long.
+                    let progress_file = note_out.with_extension("progress");
+                    let mut lines = String::new();
+                    let mut progress = |stage: &str| {
+                        lines.push_str(stage);
+                        lines.push('\n');
+                        let _ = std::fs::write(&progress_file, &lines);
+                    };
+                    progress("loading");
+                    let note = match app.smoke_draft(&gguf, t, &mut progress) {
+                        Ok(n) => format!("ok: {n} sections"),
+                        Err(e) => format!("error: {}", e.0),
+                    };
+                    tracing::info!(result = %note, "smoke-test draft");
+                    if let Err(e) = std::fs::write(&note_out, note) {
+                        tracing::warn!(error = %e, "couldn't write the smoke-test note");
+                    }
+                }
+            });
+        }
     }
-    app.status()
+    status
 }
 
 #[tauri::command]
@@ -1299,6 +1357,94 @@ async fn sync_stop_visit(
     work(move || app.sync_stop_visit(&id, by.as_deref())).await
 }
 
+// ---- the clinic hub (ADR-0029) ----------------------------------------------
+
+#[tauri::command]
+async fn sync_confirm_pairing(
+    app: State<'_, AppState>,
+    code: String,
+    by: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.sync_confirm_pairing(&code, by.as_deref())).await
+}
+
+#[tauri::command]
+async fn sync_start_over(app: State<'_, AppState>, by: Option<String>) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.sync_start_over(by.as_deref())).await
+}
+
+#[tauri::command]
+async fn sync_find_hubs(app: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.sync_find_hubs()).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn sync_join_hub(
+    app: State<'_, AppState>,
+    link: String,
+    address: String,
+    check: String,
+    device_name: String,
+    backfill_days: Option<u32>,
+    existing: bool,
+    by: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || {
+        app.sync_join_hub(&link, &address, &check, &device_name, backfill_days, existing, by.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+fn clinic_hub_status(app: State<'_, AppState>, by: Option<String>) -> serde_json::Value {
+    app.clinic_hub_status(by.as_deref())
+}
+
+#[tauri::command]
+async fn clinic_hub_settings(
+    app: State<'_, AppState>,
+    on: Option<bool>,
+    port: Option<u16>,
+    allowed: Option<Vec<String>>,
+    quota_mb: Option<u64>,
+    by: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.clinic_hub_settings(on, port, allowed, quota_mb, by.as_deref())).await
+}
+
+#[tauri::command]
+async fn clinic_hub_code(app: State<'_, AppState>, by: Option<String>) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.clinic_hub_join_code(by.as_deref())).await
+}
+
+#[tauri::command]
+async fn clinic_hub_join_self(
+    app: State<'_, AppState>,
+    device_name: String,
+    existing: bool,
+    by: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.clinic_hub_join_self(&device_name, existing, by.as_deref())).await
+}
+
+#[tauri::command]
+async fn clinic_hub_remove_device(
+    app: State<'_, AppState>,
+    device_id: String,
+    by: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app = app.inner().clone();
+    work(move || app.clinic_hub_remove_device(&device_id, by.as_deref())).await
+}
+
 /// Pins the command handler to the desktop runtime, so it can be wrapped.
 fn for_wry<F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool>(f: F) -> F {
     f
@@ -1372,6 +1518,15 @@ pub fn run() {
         sync_off,
         sync_delete_account,
         sync_stop_visit,
+        sync_find_hubs,
+        sync_join_hub,
+        sync_confirm_pairing,
+        sync_start_over,
+        clinic_hub_status,
+        clinic_hub_settings,
+        clinic_hub_code,
+        clinic_hub_join_self,
+        clinic_hub_remove_device,
         list_templates,
         template,
         preview_template,

@@ -12,6 +12,7 @@ import { AnimatePresence, LazyMotion, MotionConfig, m } from "motion/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as engine from "./engine";
 import { ConsentNotice } from "./components/ConsentNotice";
+import { PhoneWalkthrough, walkthroughDue } from "./components/PhoneWalkthrough";
 import { Toast } from "./components/Toast";
 import { ROLE_LABEL, UserPicker } from "./components/UserPicker";
 import { AppContext, loadSettings, permissions, saveSettings, type Settings, type ToastAction } from "./context";
@@ -103,6 +104,17 @@ export function App() {
       () => {},
     );
   }, [route]);
+
+  // Back in the foreground (the phone opened again on the clinic's Wi-Fi):
+  // sync now rather than at the next poll (ADR-0029 section 6). Does nothing
+  // while sync is off.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") engine.syncNow().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   const refreshStatus = useCallback(() => {
     engine.status().then(setStatus, () => setStatus(null));
@@ -311,10 +323,16 @@ export function App() {
           {route.screen === "settings" && <SettingsScreen key={route.section ?? ""} section={route.section} />}
         </main>
       </div>
-      {!settings.consentAcknowledgedAt && (
-        <ConsentNotice onAccept={() => setSettings({ consentAcknowledgedAt: new Date().toISOString() })} />
+      {/* The iPhone's first run is the walkthrough, which asks for the consent
+          agreement itself; skipped before that step, the notice asks after it. */}
+      {walkthroughDue(status, settings) ? (
+        <PhoneWalkthrough />
+      ) : (
+        !settings.consentAcknowledgedAt && (
+          <ConsentNotice onAccept={() => setSettings({ consentAcknowledgedAt: new Date().toISOString() })} />
+        )
       )}
-      {settings.consentAcknowledgedAt && team && !user && (
+      {settings.consentAcknowledgedAt && team && !user && !walkthroughDue(status, settings) && (
         <UserPicker
           onChosen={(u) => {
             setUser(u);

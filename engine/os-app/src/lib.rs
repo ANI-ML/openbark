@@ -47,12 +47,14 @@ pub use templates::{
     TemplatesMode,
 };
 
+mod clinic_hub;
 #[doc(hidden)]
 pub mod demo;
 mod mic;
 mod phone;
 mod sync;
 mod templates;
+pub use clinic_hub::{hub_dir, hub_inspect};
 pub use mic::{MicLevel, MicTestStarted};
 pub use os_connect::{ConnectStore, PhonePrefs};
 pub use os_engine::live::CallBlock;
@@ -317,6 +319,11 @@ pub struct App {
     mic_test: Mutex<Option<mic::MicTest>>,
     /// Visits being imported, recorded, drafted, saved or deleted (ADR-0022).
     visit_locks: VisitLocks,
+    /// Deleted visits change one step at a time: a delete, restore or
+    /// removal holds this from moving a folder until its record is written,
+    /// and housekeeping holds it while it recovers, so it never mistakes
+    /// work in progress for what a crash left behind.
+    trash_work: Mutex<()>,
     gate: Arc<Gate>,
     hardware: Hardware,
     /// The GPU speech pack was in place when this process started, so its
@@ -333,6 +340,9 @@ pub struct App {
     /// Run a sync now rather than at the next 30-second poll.
     #[cfg_attr(not(feature = "sync"), allow(dead_code))]
     sync_wake: std::sync::atomic::AtomicBool,
+    /// This computer as the clinic hub (ADR-0029), once hub mode was turned on.
+    #[cfg(feature = "hub")]
+    hub: Mutex<Option<clinic_hub::HubRuntime>>,
     /// The clinic's own Twilio account and this computer's phone settings
     /// (ADR-0023). `OPENBARK_CONNECTIONS_DIR` moves it, away from the keychain.
     pub connect: ConnectStore,
@@ -591,6 +601,9 @@ pub struct ModelStatus {
     pub id: String,
     pub name: String,
     pub installed: bool,
+    /// Came with the app (the iPhone app's speech models, ADR-0018 section
+    /// 10): used from the app itself, never downloaded or removed.
+    pub bundled: bool,
 }
 
 #[derive(Serialize)]
@@ -621,6 +634,10 @@ pub struct Status {
     /// The model that writes notes unless the person picks another: Gemma 4
     /// E4B on a computer, the tier's small model on a phone.
     pub default_llm: String,
+    /// This build can write notes (it has llama.cpp: the `inference`
+    /// feature). Phone builds turn on transcription first; until one with
+    /// `inference` ships, a phone doesn't offer drafting (ADR-0018 section 1).
+    pub can_draft: bool,
 }
 
 /// A visit as listed under a patient.
@@ -881,6 +898,13 @@ pub struct ModelRow {
     pub installed: bool,
     pub fit: Fit,
     pub builtin: bool,
+    /// Came with the app (the iPhone app's speech models): shown as Built in,
+    /// with nothing to download or remove.
+    pub bundled: bool,
+    /// The credit the model's licence asks for (CC-BY-4.0, NVIDIA's
+    /// statement), shown with the model, downloaded or built in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
     /// Bytes on disk that are OpenBark's alone, so removing them frees that
     /// much (0 when used in place).
     pub disk_bytes: u64,
@@ -1288,6 +1312,7 @@ impl App {
             warm: Mutex::new(mic::Warm::Empty),
             mic_test: Mutex::new(None),
             visit_locks: Arc::new(Mutex::new(HashMap::new())),
+            trash_work: Mutex::new(()),
             gate: Arc::new(Gate::default()),
             hardware: probe_hardware(),
             gpu_at_start: os_models::gpu_pack::loaded_at_start(),
@@ -1296,6 +1321,8 @@ impl App {
             #[cfg(feature = "sync")]
             sync: None,
             sync_wake: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "hub")]
+            hub: Mutex::new(None),
             connect: ConnectStore::default(),
             twilio_base: None,
             call: Mutex::new(None),
@@ -1326,10 +1353,104 @@ impl App {
         });
     }
 
+    /// The iOS check's transcription smoke test (ADR-0018 sections 8 and
+    /// 10): transcribe a WAV file with this device's speech models (on a
+    /// phone, the ones built into the app), without speaker labels, and
+    /// return the text. Fails when this build can't transcribe (no `stt`).
+    pub fn smoke_transcribe(&self, wav: &Path) -> Result<String> {
+        let transcript = self.smoke_transcript(wav)?;
+        Ok(transcript
+            .segments
+            .iter()
+            .map(|s| s.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    /// The iOS check's drafting smoke test (ADR-0018 section 10): draft a
+    /// SOAP note from `transcript` with the GGUF at `gguf` (a tiny test
+    /// model the script copies in; no model ships in the app), on the
+    /// processor, and return how many sections came back. Fails when this
+    /// build can't draft (no `inference`) or no note comes back.
+    /// `progress` hears each stage ("loaded") and every 32 tokens, so a
+    /// slow or stuck draft shows where it is.
+    pub fn smoke_draft(
+        &self,
+        gguf: &Path,
+        transcript: &Transcript,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<usize> {
+        // Two threads on the processor: the CI simulator shares a 3-core
+        // runner, and ggml's threads spin-wait, so more threads than cores
+        // slow it down by orders of magnitude.
+        let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
+        let threads = 2;
+        let mut options = LlamaCppOptions::new(gguf);
+        options.gpu_layers = 0;
+        options.threads = Some(threads);
+        let llm: Arc<dyn LlmBackend> = Arc::new(LlamaCppBackend::load(options)?);
+        progress(&format!("loaded ({threads} threads, {cores} cores)"));
+        // Plain generation first, no schema: tokens per second without the
+        // constrained sampling, to tell the two costs apart.
+        let mut request = os_llm::GenerateRequest::new(vec![os_llm::ChatMessage::user(
+            "Count from one to fifty, in words.",
+        )]);
+        request.max_tokens = 64;
+        let started = std::time::Instant::now();
+        let mut plain = 0u32;
+        llm.generate(&request, &mut |_| {
+            plain += 1;
+            true
+        })
+        .map_err(|e| AppError(e.to_string()))?;
+        let secs = started.elapsed().as_secs_f64().max(0.001);
+        progress(&format!("plain: {plain} tokens in {secs:.1} s ({:.1} tokens/s)", plain as f64 / secs));
+        let template = LoadedTemplate::resolve("soap").map_err(|e| AppError(e.to_string()))?;
+        // The app's own limit: a tiny test model can run long in a string
+        // before it closes the note.
+        let options = NoteOptions { max_tokens: 4096, ..Default::default() };
+        let started = std::time::Instant::now();
+        let mut tokens = 0u32;
+        let result = os_engine::generate_note(&*llm, &template, transcript, &options, &mut |_| {
+            tokens += 1;
+            if tokens.is_multiple_of(32) {
+                progress(&format!("note: {tokens} tokens in {:.0} s", started.elapsed().as_secs_f64()));
+            }
+            true
+        })
+        .map_err(|e| AppError(e.to_string()))?;
+        let secs = started.elapsed().as_secs_f64().max(0.001);
+        progress(&format!("note: {tokens} tokens in {secs:.1} s ({:.1} tokens/s)", tokens as f64 / secs));
+        let sections = result.note.as_object().map_or(0, |o| o.len());
+        if sections == 0 {
+            return Err(AppError("the note came back empty".into()));
+        }
+        Ok(sections)
+    }
+
+    /// [`App::smoke_transcribe`]'s transcript itself.
+    pub fn smoke_transcript(&self, wav: &Path) -> Result<Transcript> {
+        let stt = if Profile::current().is_mobile() {
+            os_models::platform::MOBILE_STT
+        } else {
+            os_engine::models::DEFAULT_STT
+        };
+        let transcriber = os_engine::models::transcriber(&self.store, stt, false, None, None, None, false)
+            .map_err(|e| AppError(e.to_string()))?;
+        let audio = os_asr::Audio::load(wav).map_err(|e| AppError(e.to_string()))?;
+        let (transcript, _) = transcriber.run(&audio, &mut |_| {}).map_err(|e| AppError(e.to_string()))?;
+        Ok(transcript)
+    }
+
     pub fn status(&self) -> Status {
+        let catalog = os_models::Catalog::builtin();
         let models = os_engine::models::required_status_for(&self.store, Profile::current())
             .into_iter()
-            .map(|(id, name, installed)| ModelStatus { id, name, installed })
+            .map(|(id, name, installed)| {
+                let bundled = catalog.get(&id).is_some_and(|m| self.store.is_bundled(m));
+                ModelStatus { id, name, installed, bundled }
+            })
             .collect();
         Status {
             product: os_engine::PRODUCT_NAME,
@@ -1347,6 +1468,7 @@ impl App {
             profile: Profile::current(),
             mobile_tier: self.phone_tier().flatten().map(|t| t.ram_gb),
             default_llm: self.default_llm(),
+            can_draft: cfg!(feature = "inference"),
         }
     }
 
@@ -2062,6 +2184,9 @@ impl App {
         let result = recorder.stop()?;
         let mut s = Session::open(&result.session_dir)?;
         self.link_visit(&mut s)?;
+        // Stop and save syncs at once (ADR-0029 section 6), not at the next poll.
+        #[cfg(feature = "sync")]
+        self.sync_soon();
         Ok(view(&s, Some(result.transcript)))
     }
 
@@ -2092,6 +2217,8 @@ impl App {
         }
         s.set_patient(patient)?;
         self.link_visit(&mut s)?;
+        #[cfg(feature = "sync")]
+        self.sync_soon();
         Ok(view(&s, None))
     }
 
@@ -2492,6 +2619,7 @@ impl App {
             recovered: false,
         };
         let tombstone = audit::tombstone(&s, Some(&trash_id));
+        let _trash = self.trash_work.lock().unwrap_or_else(|e| e.into_inner());
         let trashed = trash.put(&dir, &info)?;
         let mut entry = EventDraft::new(EventKind::VisitDeleted, who, self.users.is_team());
         entry.id = Some(info.event_id.clone());
@@ -2554,6 +2682,7 @@ impl App {
         let trash = self.trash();
         let (info, s) = trash.get(trash_id)?;
         let tombstone = audit::tombstone(&s, Some(trash_id));
+        let _trash = self.trash_work.lock().unwrap_or_else(|e| e.into_inner());
         let restored = trash.restore(trash_id)?;
         let mut entry = EventDraft::new(EventKind::VisitRestored, who, self.users.is_team());
         entry.visit = Some(tombstone);
@@ -2602,6 +2731,7 @@ impl App {
         };
         let tombstone = audit::tombstone(&s, Some(trash_id));
         drop(s);
+        let _trash = self.trash_work.lock().unwrap_or_else(|e| e.into_inner());
         let purging = trash.begin_purge(trash_id)?;
         let mut entry = EventDraft::new(EventKind::VisitPurged, who, self.users.is_team());
         entry.visit = Some(tombstone);
@@ -2634,6 +2764,7 @@ impl App {
             let Ok((info, s)) = trash.get(&trash_id) else { continue };
             let tombstone = audit::tombstone(&s, Some(&trash_id));
             drop(s);
+            let _trash = self.trash_work.lock().unwrap_or_else(|e| e.into_inner());
             let purging = match trash.begin_purge(&trash_id) {
                 Ok(p) => p,
                 Err(e) => {
@@ -2665,6 +2796,7 @@ impl App {
     /// how many entries were added.
     pub fn recover_deleted(&self, now: DateTime<Local>) -> usize {
         let Ok(_work) = self.begin_work() else { return 0 };
+        let _trash = self.trash_work.lock().unwrap_or_else(|e| e.into_inner());
         let trash = self.trash();
         let audit = self.audit();
         let team = self.users.is_team();
@@ -2701,8 +2833,21 @@ impl App {
             }
         }
         // Deleted visits whose entry is missing (including any just described).
+        // A delete or restore in this process holds the visit's lock from
+        // moving the folder until its record is written: that's work in
+        // progress, not a crash to recover from. The lock is released only
+        // after the record, so a fresh read settles one that just finished.
+        let in_progress = |info: &DeletedInfo| {
+            let held = |key: String| {
+                self.visit_locks.lock().map(|h| h.contains_key(&key.to_ascii_lowercase())).unwrap_or(true)
+            };
+            held(info.original_name.clone()) || held(format!("deleted:{}", info.trash_id))
+        };
         for (info, s) in trash.list() {
-            if events.iter().any(|e| e.id == info.event_id) {
+            if events.iter().any(|e| e.id == info.event_id) || in_progress(&info) {
+                continue;
+            }
+            if audit.read_readable().is_ok_and(|now| now.iter().any(|e| e.id == info.event_id)) {
                 continue;
             }
             let mut entry = EventDraft::new(EventKind::VisitDeleted, info.by.clone(), team);
@@ -3173,6 +3318,8 @@ impl App {
                 Fit::Fits
             },
             builtin,
+            bundled: self.store.is_bundled(m),
+            attribution: m.attribution.clone(),
             disk_bytes: self.store.disk_usage(m),
             shared_bytes: self.store.shared_bytes(m),
             partial_bytes: self.store.partial_bytes(m),
@@ -3876,8 +4023,10 @@ pub struct HeldFile {
     pub reason: String,
 }
 
-/// Note models made for 6 GB phones: a computer doesn't list them.
-const PHONE_ONLY: &[&str] = &["qwen3-1.7b-q4_k_m"];
+/// Note models in the catalog for phones only (ADR-0018 section 10): a
+/// computer doesn't list them, so its catalog stays as it was.
+const PHONE_ONLY: &[&str] =
+    &["qwen3-1.7b-q4_k_m", "qwen3-4b-instruct-2507-q4_k_m", "nemotron-3-nano-4b-q4_k_m"];
 
 /// The repo sheet on a phone: offered files only, the rest listed with why,
 /// and MLX never shown.
