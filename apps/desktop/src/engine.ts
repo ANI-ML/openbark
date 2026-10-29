@@ -1194,6 +1194,38 @@ export const setUserAdmin = (uid: string, admin: boolean, approver: Approver | n
   isDesktop
     ? invoke<User>("set_user_admin", { uid, admin, by: actor, approver })
     : api<User>(`/api/users/${enc(uid)}/admin`, post({ by: actor, admin, approver }));
+/** A clinic's own word or drug name (Settings, Words and drug names; ADR-0031). */
+export interface ClinicTerm {
+  term: string;
+  kind: VocabularyKind;
+  /** How speech recognition writes it ("heard as"), one to three words each. */
+  heard: string[];
+}
+export type VocabularyKind = "drug" | "vaccine" | "product" | "condition" | "procedure";
+export interface VocabularyView {
+  terms: ClinicTerm[];
+  /** Terms that come with OpenBark: written for it, and from public drug registers. */
+  builtin: number;
+  regulatory: number;
+  file: string;
+  /** Changing the list needs an admin's PIN (a team). */
+  needs_admin: boolean;
+}
+export const vocabulary = () =>
+  isDesktop ? invoke<VocabularyView>("vocabulary") : api<VocabularyView>("/api/vocabulary");
+export const saveVocabularyTerm = (term: ClinicTerm, approver: Approver | null) =>
+  isDesktop
+    ? invoke<VocabularyView>("save_vocabulary_term", { term, by: actor, approver })
+    : api<VocabularyView>("/api/vocabulary/save", post({ term, by: actor, approver }));
+export const removeVocabularyTerm = (term: string, approver: Approver | null) =>
+  isDesktop
+    ? invoke<VocabularyView>("remove_vocabulary_term", { term, by: actor, approver })
+    : api<VocabularyView>("/api/vocabulary/remove", post({ term, by: actor, approver }));
+/** The app's language, which the second speech recogniser is told to expect. */
+export const setSpeechLanguage = (language: string) =>
+  isDesktop
+    ? invoke<void>("set_speech_language", { language })
+    : api<void>("/api/speech-language", post({ language }));
 /** What a team member keeps in their profile, before removing them. */
 export const profileSummary = (uid: string) =>
   isDesktop
@@ -1959,9 +1991,15 @@ export interface ProcessingProgress {
   total: number;
 }
 
+/** "Speakers in the room" as a query parameter: absent for Auto. */
+function roomSpeakersQuery(roomSpeakers: number | null): Record<string, string> {
+  return roomSpeakers ? { room_speakers: String(roomSpeakers) } : {};
+}
+
 export async function importRecording(
   speakers: boolean,
   speakerphone: boolean,
+  roomSpeakers: number | null,
   patient: Patient | null,
   consent: RecordingConsent | null,
   onPicked: () => void,
@@ -1972,7 +2010,15 @@ export async function importRecording(
     const picked = await open({ multiple: false, filters: [{ name: "Recording", extensions: AUDIO_EXTENSIONS }] });
     if (typeof picked !== "string") return null;
     onPicked();
-    return invoke<SessionView>("import_file", { path: picked, speakers, speakerphone, patient: p, consent, by: actor });
+    return invoke<SessionView>("import_file", {
+      path: picked,
+      speakers,
+      speakerphone,
+      roomSpeakers,
+      patient: p,
+      consent,
+      by: actor,
+    });
   }
   const file = await pickBrowserFile();
   if (!file) return null;
@@ -1981,6 +2027,7 @@ export async function importRecording(
     const q = new URLSearchParams({
       diarize: String(speakers),
       speakerphone: String(speakerphone),
+      ...roomSpeakersQuery(roomSpeakers),
       name,
       patient_name: p?.name ?? "",
       others: (p?.others ?? [])
@@ -2023,11 +2070,12 @@ export interface Recording {
 async function startDesktopRecording(
   speakers: boolean,
   speakerphone: boolean,
+  roomSpeakers: number | null,
   device: string | null,
   patient: Patient | null,
   consent: RecordingConsent | null,
 ): Promise<Recording> {
-  await invoke<string>("start_recording", { device, speakers, speakerphone, patient, consent, by: actor });
+  await invoke<string>("start_recording", { device, speakers, speakerphone, roomSpeakers, patient, consent, by: actor });
   return { stop: () => invoke<SessionView>("stop_recording") };
 }
 
@@ -2039,6 +2087,7 @@ async function startDesktopRecording(
 async function startBrowserRecording(
   speakers: boolean,
   speakerphone: boolean,
+  roomSpeakers: number | null,
   deviceId: string | null,
   patient: Patient | null,
   consent: RecordingConsent | null,
@@ -2049,6 +2098,7 @@ async function startBrowserRecording(
     const q = new URLSearchParams({
       speakers: String(speakers),
       speakerphone: String(speakerphone),
+      ...roomSpeakersQuery(roomSpeakers),
       sample_rate: String(sampleRate),
       patient_name: patient?.name ?? "",
       others: (patient?.others ?? [])
@@ -2092,6 +2142,7 @@ export type { MicHealth, MicQuality };
 export function startRecording(
   speakers: boolean,
   speakerphone: boolean,
+  roomSpeakers: number | null,
   device: string | null,
   patient: Patient | null,
   consent: RecordingConsent | null,
@@ -2100,8 +2151,8 @@ export function startRecording(
   const p = hasPatient(patient) ? patient : null;
   const h = typeof hooks === "function" ? { onLevel: hooks } : hooks;
   return isDesktop
-    ? startDesktopRecording(speakers, speakerphone, device, p, consent)
-    : startBrowserRecording(speakers, speakerphone, device, p, consent, h);
+    ? startDesktopRecording(speakers, speakerphone, roomSpeakers, device, p, consent)
+    : startBrowserRecording(speakers, speakerphone, roomSpeakers, device, p, consent, h);
 }
 
 /**

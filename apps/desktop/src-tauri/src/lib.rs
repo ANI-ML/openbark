@@ -15,10 +15,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use os_app::{
-    App, AppError, Approver, CallBlock, CallEnd, CallRequest, CallStart, CallTarget, ConnectRequest,
-    Connected, ConsentOutcome, Disconnected, Events, Patient, PdfRequest, PhonePrefs, PhoneToken, PhoneView,
-    ProfileSummary, RecordingConsent, RecordingSource, RefineRequest, ResetView, SaveTemplateRequest,
-    SetupCheck, ShareMode, TeamSettingsView, TemplateMode, TemplateSummary, TemplateView,
+    App, AppError, Approver, CallBlock, CallEnd, CallRequest, CallStart, CallTarget, ClinicTerm,
+    ConnectRequest, Connected, ConsentOutcome, Disconnected, Events, Patient, PdfRequest, PhonePrefs,
+    PhoneToken, PhoneView, ProfileSummary, RecordingConsent, RecordingSource, RefineRequest, ResetView,
+    SaveTemplateRequest, SetupCheck, ShareMode, TeamSettingsView, TemplateMode, TemplateSummary,
+    TemplateView, VocabularyView,
 };
 use os_engine::Segment;
 use os_engine::template::{Scope, Standard, Template};
@@ -662,6 +663,7 @@ async fn import_file(
     path: String,
     speakers: bool,
     speakerphone: Option<bool>,
+    room_speakers: Option<u32>,
     patient: Option<Patient>,
     consent: Option<RecordingConsent>,
     by: Option<String>,
@@ -672,6 +674,7 @@ async fn import_file(
             Path::new(&path),
             speakers,
             speakerphone.unwrap_or(false),
+            room_speakers,
             patient,
             consent,
             by.as_deref(),
@@ -689,6 +692,7 @@ async fn start_recording(
     device: Option<String>,
     speakers: bool,
     speakerphone: Option<bool>,
+    room_speakers: Option<u32>,
     patient: Option<Patient>,
     consent: Option<RecordingConsent>,
     by: Option<String>,
@@ -699,6 +703,7 @@ async fn start_recording(
             RecordingSource::Microphone(device),
             speakers,
             speakerphone.unwrap_or(false),
+            room_speakers,
             patient,
             consent,
             by.as_deref(),
@@ -1208,6 +1213,40 @@ fn dismiss_setup_notice(app: State<'_, AppState>, by: Option<String>) -> Result<
     app.dismiss_setup_notice(by.as_deref()).map_err(|e| e.0)
 }
 
+/// The clinic's words and drug names (ADR-0031).
+#[tauri::command]
+fn vocabulary(app: State<'_, AppState>) -> Result<VocabularyView, String> {
+    app.vocabulary().map_err(|e| e.0)
+}
+
+#[tauri::command]
+async fn save_vocabulary_term(
+    app: State<'_, AppState>,
+    term: ClinicTerm,
+    by: Option<String>,
+    approver: Option<Approver>,
+) -> Result<VocabularyView, String> {
+    let app = app.inner().clone();
+    work(move || app.save_vocabulary_term(&term, by.as_deref(), approver.as_ref())).await
+}
+
+#[tauri::command]
+async fn remove_vocabulary_term(
+    app: State<'_, AppState>,
+    term: String,
+    by: Option<String>,
+    approver: Option<Approver>,
+) -> Result<VocabularyView, String> {
+    let app = app.inner().clone();
+    work(move || app.remove_vocabulary_term(&term, by.as_deref(), approver.as_ref())).await
+}
+
+/// The app's language, which the second recogniser is told to expect.
+#[tauri::command]
+fn set_speech_language(language: String) {
+    os_engine::models::set_speech_language(Some(&language));
+}
+
 #[tauri::command]
 async fn set_user_admin(
     app: State<'_, AppState>,
@@ -1576,6 +1615,10 @@ pub fn run() {
         team_settings,
         set_team_settings,
         dismiss_setup_notice,
+        vocabulary,
+        save_vocabulary_term,
+        remove_vocabulary_term,
+        set_speech_language,
         set_user_admin,
         profile_summary,
         models,
