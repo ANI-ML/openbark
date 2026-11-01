@@ -632,6 +632,33 @@ async fn clear_hf_token(
     work(move || app.clear_hf_token(by.as_deref())).await
 }
 
+// ---- The version check (ADR-0035, docs/network.md R16) ----------------------
+// The request is made here in Rust (os_models::update), never by the
+// WebView, so the main window's Content-Security-Policy stays "this
+// computer only". The interface asks for the automatic check only while
+// the person's daily check is on; `manual` is Check for updates.
+
+#[tauri::command]
+async fn check_for_update(app: State<'_, AppState>, manual: bool) -> Result<os_app::UpdateView, String> {
+    let app = app.inner().clone();
+    work(move || app.check_for_update(manual)).await
+}
+
+/// What the last check found; no request.
+#[tauri::command]
+fn update_status(app: State<'_, AppState>) -> os_app::UpdateView {
+    app.update_status()
+}
+
+/// What's new (`notes`) or Download (`download`) in the default browser. The
+/// address comes from the engine's checked list, never from the WebView.
+#[tauri::command]
+fn open_release_link(handle: AppHandle, app: State<'_, AppState>, which: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = app.release_link(&which).map_err(|e| e.0)?;
+    handle.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn hub_alternatives(
     app: State<'_, AppState>,
@@ -761,6 +788,18 @@ async fn generate_note(
 #[tauri::command]
 fn cancel_draft(app: State<'_, AppState>) -> bool {
     app.cancel_draft()
+}
+
+/// The speed check (setup, ADR-0034): time the note model on invented text.
+/// Stop is `cancel_draft`.
+#[tauri::command]
+async fn speed_check(
+    handle: AppHandle,
+    app: State<'_, AppState>,
+    llm: String,
+) -> Result<os_app::SpeedCheck, String> {
+    let app = app.inner().clone();
+    work(move || app.speed_check(&llm, &TauriEvents(handle))).await
 }
 
 /// Copy diagnostics (Settings, About): the computer, the note model, the
@@ -1261,6 +1300,17 @@ fn set_speech_language(language: String) {
     os_engine::models::set_speech_language(Some(&language));
 }
 
+/// A web page in the default browser: NVIDIA's licence, a Hugging Face
+/// model's page or its token page. The WebView names the page and
+/// os_app::links builds the address, so the main window needs no opener
+/// permission of its own (capabilities/default.json).
+#[tauri::command]
+fn open_web_page(handle: AppHandle, page: String, repo: Option<String>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = os_app::links::web_link(&page, repo.as_deref()).map_err(|e| e.0)?;
+    handle.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Settings, Recording, Spoken language ("fr"); None is Auto (ADR-0033).
 #[tauri::command]
 fn set_spoken_language(language: Option<String>) {
@@ -1572,6 +1622,7 @@ pub fn run() {
         stop_recording,
         generate_note,
         cancel_draft,
+        speed_check,
         diagnostics,
         sign_note,
         confirm_chart,
@@ -1641,6 +1692,7 @@ pub fn run() {
         remove_vocabulary_term,
         set_speech_language,
         set_spoken_language,
+        open_web_page,
         set_user_admin,
         profile_summary,
         models,
@@ -1655,6 +1707,9 @@ pub fn run() {
         hf_token_status,
         set_hf_token,
         clear_hf_token,
+        check_for_update,
+        update_status,
+        open_release_link,
         hub_search,
         hub_repo,
         hub_add,

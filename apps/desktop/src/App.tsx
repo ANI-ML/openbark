@@ -13,9 +13,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as engine from "./engine";
 import { ConsentNotice } from "./components/ConsentNotice";
 import { PhoneWalkthrough, walkthroughDue } from "./components/PhoneWalkthrough";
+import { SetupWalkthrough } from "./components/SetupWalkthrough";
 import { Toast } from "./components/Toast";
+import { UpdateChecks } from "./components/UpdateCheck";
 import { ROLE_LABEL, UserPicker } from "./components/UserPicker";
-import { AppContext, loadSettings, permissions, saveSettings, type Settings, type ToastAction } from "./context";
+import {
+  AppContext,
+  loadSettings,
+  permissions,
+  saveSettings,
+  type Settings,
+  type ToastAction,
+  type ToastOptions,
+} from "./context";
 import { translate } from "./i18n";
 import { loadMotionFeatures, SPRING } from "./motion";
 import { hashToRoute, routeToHash, type Route } from "./routes";
@@ -28,6 +38,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { Templates } from "./screens/Templates";
 import { Help } from "./screens/Help";
 import { Visits } from "./screens/Visits";
+import { setupDone, setupMode } from "./setup";
 import { isIos, needsYou } from "./visits";
 
 export type { Route } from "./routes";
@@ -63,9 +74,12 @@ export function App() {
   );
   const [status, setStatus] = useState<engine.Status | null>(null);
   const [settings, setSettingsState] = useState<Settings>(loadSettings);
-  const [toast, setToastState] = useState<{ n: number; message: string; action?: ToastAction } | null>(null);
+  const [toast, setToastState] = useState<
+    { n: number; message: string; action?: ToastAction; options?: ToastOptions } | null
+  >(null);
   const showToast = useCallback(
-    (message: string, action?: ToastAction) => setToastState((prev) => ({ n: (prev?.n ?? 0) + 1, message, action })),
+    (message: string, action?: ToastAction, options?: ToastOptions) =>
+      setToastState((prev) => ({ n: (prev?.n ?? 0) + 1, message, action, options })),
     [],
   );
   const closeToast = useCallback(() => setToastState(null), []);
@@ -137,6 +151,8 @@ export function App() {
   // already drafts with E4B keeps it (Models and Record suggest switching).
   useEffect(() => {
     if (!status || status.profile === "ios" || !status.default_llm) return;
+    // A model chosen in setup (ADR-0034) is the person's choice: never swapped.
+    if (settings.noteModelChosenAt) return;
     if (settings.llm !== "gemma-4-e4b-it-q4_0" || status.default_llm === settings.llm) return;
     const wanted = status.default_llm;
     engine.models().then(
@@ -218,6 +234,8 @@ export function App() {
     levels,
   };
   const active = activeOf(route);
+  /** The computer's setup walkthrough (ADR-0034), once consent is given and, with a team, someone is chosen. */
+  const setup = setupMode(status, settings, team && !user);
   const t = (text: string, vars?: Record<string, string | number>) => translate(settings.uiLanguage, text, vars);
   /** On a phone, Templates, Models and Help open from Settings, so its tab stays marked. */
   const underSettings = active === "templates" || active === "models" || active === "help";
@@ -365,9 +383,31 @@ export function App() {
           }}
         />
       )}
+      {setup && <SetupWalkthrough key={setup} mode={setup} />}
+      {/* The version check (ADR-0035): asked once, after the consent notice
+          (and choosing who is using the app) and once setup is done, so never
+          over the setup walkthrough (ADR-0034); never on the iPhone; the daily
+          check only once the person said yes. */}
+      <UpdateChecks
+        ready={
+          Boolean(settings.consentAcknowledgedAt) &&
+          !(team && !user) &&
+          !walkthroughDue(status, settings) &&
+          setupDone(status, settings, team && !user)
+        }
+      />
       {/* The toast arrives and leaves (it used to vanish); a new one waits for the old to go. */}
       <AnimatePresence mode="wait">
-        {toast && <Toast key={toast.n} message={toast.message} action={toast.action} onClose={closeToast} />}
+        {toast && (
+          <Toast
+            key={toast.n}
+            message={toast.message}
+            action={toast.action}
+            more={toast.options?.more}
+            ms={toast.options?.ms}
+            onClose={closeToast}
+          />
+        )}
       </AnimatePresence>
       <div className="sr-only" aria-live="polite">
         {announce}
