@@ -32,6 +32,9 @@
 //! - `POST /api/sessions/{id}/chart/confirm` `{teeth, confirmed, by, pet?}`: a veterinarian
 //!   confirms (or takes back) the drafted tooth chart entries on these teeth; signing
 //!   waits for every drafted entry (ADR-0021)
+//! - `POST /api/sessions/{id}/defaults` `{heading, labels, confirm, text?, by, pet?}`: confirm
+//!   (a veterinarian) or remove normal findings from the template; signing waits for every
+//!   one (ADR-0032)
 //! - `POST /api/sessions/{id}/pdf`          `{clinic: {name, lines}, page, document?}` → application/pdf
 //! - Templates (ADR-0024; reads take `by` in the query, writes in the body; an
 //!   admin's PIN travels only in a body, as `approver: {id, pin}`):
@@ -296,6 +299,7 @@ fn router(state: St, ui_dir: &std::path::Path, port: u16) -> Router {
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/sessions/{id}/sign", post(sign_note))
         .route("/api/sessions/{id}/chart/confirm", post(confirm_chart))
+        .route("/api/sessions/{id}/defaults", post(settle_defaults))
         .route("/api/sessions/{id}/patient", post(update_patient))
         .route("/api/sessions/{id}/refine", post(refine_note))
         .route("/api/sessions/{id}/edit", post(edit_note))
@@ -328,6 +332,7 @@ fn router(state: St, ui_dir: &std::path::Path, port: u16) -> Router {
         .route("/api/vocabulary/save", post(save_vocabulary_term))
         .route("/api/vocabulary/remove", post(remove_vocabulary_term))
         .route("/api/speech-language", post(set_speech_language))
+        .route("/api/spoken-language", post(set_spoken_language))
         .route("/api/users/{uid}/admin", post(set_user_admin))
         .route("/api/users/{uid}/profile", get(profile_summary))
         .route("/api/live", get(live))
@@ -1648,6 +1653,34 @@ async fn confirm_chart(
     blocking(move || s.app().confirm_chart(&id, &req.teeth, req.confirmed, &req.by, req.pet.as_deref())).await
 }
 
+#[derive(Deserialize)]
+struct SettleDefaults {
+    heading: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    confirm: bool,
+    #[serde(default)]
+    text: Option<String>,
+    by: String,
+    #[serde(default)]
+    pet: Option<String>,
+}
+
+/// Confirm or remove normal findings from the template (ADR-0032).
+async fn settle_defaults(
+    State(s): State<St>,
+    UrlPath(id): UrlPath<String>,
+    Json(req): Json<SettleDefaults>,
+) -> Result<impl IntoResponse, ApiError> {
+    let request = os_engine::defaults::SettleRequest {
+        heading: req.heading,
+        labels: req.labels,
+        confirm: req.confirm,
+        text: req.text,
+    };
+    blocking(move || s.app().settle_defaults(&id, &request, &req.by, req.pet.as_deref())).await
+}
+
 async fn update_patient(
     State(s): State<St>,
     UrlPath(id): UrlPath<String>,
@@ -1971,6 +2004,18 @@ struct SpeechLanguageBody {
 /// The app's language, which the second recogniser is told to expect.
 async fn set_speech_language(Json(req): Json<SpeechLanguageBody>) -> StatusCode {
     os_engine::models::set_speech_language(Some(&req.language));
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+struct SpokenLanguageBody {
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// Settings, Recording, Spoken language ("fr"); null is Auto (ADR-0033).
+async fn set_spoken_language(Json(req): Json<SpokenLanguageBody>) -> StatusCode {
+    os_engine::models::set_spoken_language(req.language.as_deref());
     StatusCode::NO_CONTENT
 }
 
@@ -2425,6 +2470,7 @@ mod tests {
             refinement: None,
             edit: None,
             by: None,
+            template_defaults: Vec::new(),
             markdown: "# SOAP note\n".into(),
         };
         s.save_run("gemma", &result, &os_engine::LoadedTemplate::builtin("soap").unwrap()).unwrap();

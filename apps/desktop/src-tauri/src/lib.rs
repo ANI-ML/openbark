@@ -800,6 +800,20 @@ async fn confirm_chart(
     work(move || app.confirm_chart(&id, &teeth, confirmed, &by, pet.as_deref())).await
 }
 
+/// Confirm or remove normal findings from the template waiting in the
+/// latest draft (ADR-0032).
+#[tauri::command]
+async fn settle_defaults(
+    app: State<'_, AppState>,
+    id: String,
+    request: os_engine::defaults::SettleRequest,
+    by: String,
+    pet: Option<String>,
+) -> Result<os_app::NoteResponse, String> {
+    let app = app.inner().clone();
+    work(move || app.settle_defaults(&id, &request, &by, pet.as_deref())).await
+}
+
 #[tauri::command]
 async fn refine_note(
     handle: AppHandle,
@@ -1247,6 +1261,12 @@ fn set_speech_language(language: String) {
     os_engine::models::set_speech_language(Some(&language));
 }
 
+/// Settings, Recording, Spoken language ("fr"); None is Auto (ADR-0033).
+#[tauri::command]
+fn set_spoken_language(language: Option<String>) {
+    os_engine::models::set_spoken_language(language.as_deref());
+}
+
 #[tauri::command]
 async fn set_user_admin(
     app: State<'_, AppState>,
@@ -1555,6 +1575,7 @@ pub fn run() {
         diagnostics,
         sign_note,
         confirm_chart,
+        settle_defaults,
         update_patient,
         refine_note,
         edit_note,
@@ -1619,6 +1640,7 @@ pub fn run() {
         save_vocabulary_term,
         remove_vocabulary_term,
         set_speech_language,
+        set_spoken_language,
         set_user_admin,
         profile_summary,
         models,

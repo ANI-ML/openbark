@@ -1110,6 +1110,8 @@ const MODEL_BUSY: &str = "A note is being written with this model. Remove it whe
 const MLX_FIRST: &str = "Download the MLX engine on the Models screen first.";
 const MLX_NEEDS: &str = "MLX models run on a Mac with Apple silicon and macOS 14 or later.";
 /// A model that isn't marked for phones, asked for on one (ADR-0018 section 10).
+/// A catalogue model kept only for measuring (ADR-0033), never offered.
+const NOT_OFFERED: &str = "This model isn't offered in OpenBark.";
 const NOT_FOR_PHONE: &str =
     "This model isn't made for phones. On an iPhone, OpenBark offers small models only.";
 /// Adding a model file from the phone itself (not in M3).
@@ -1537,9 +1539,9 @@ impl App {
         let secs = started.elapsed().as_secs_f64().max(0.001);
         progress(&format!("plain: {plain} tokens in {secs:.1} s ({:.1} tokens/s)", plain as f64 / secs));
         let template = LoadedTemplate::resolve("soap").map_err(|e| AppError(e.to_string()))?;
-        // The app's own limit: a tiny test model can run long in a string
-        // before it closes the note.
-        let options = NoteOptions { max_tokens: 4096, ..Default::default() };
+        // The app's own limit for a transcript this short: a tiny test model
+        // can run long in a string before it closes the note.
+        let options = NoteOptions { max_tokens: Some(4096), ..Default::default() };
         let started = std::time::Instant::now();
         let mut tokens = 0u32;
         let result = os_engine::generate_note(&*llm, &template, transcript, &options, &mut |_| {
@@ -1566,8 +1568,9 @@ impl App {
         } else {
             os_engine::models::DEFAULT_STT
         };
-        let transcriber = os_engine::models::transcriber(&self.store, stt, false, None, None, None, false)
-            .map_err(|e| AppError(e.to_string()))?;
+        let transcriber =
+            os_engine::models::transcriber(&self.store, stt, None, false, None, None, None, false)
+                .map_err(|e| AppError(e.to_string()))?;
         let audio = os_asr::Audio::load(wav).map_err(|e| AppError(e.to_string()))?;
         let (transcript, _) = transcriber.run(&audio, &mut |_| {}).map_err(|e| AppError(e.to_string()))?;
         Ok(transcript)
@@ -1670,9 +1673,8 @@ impl App {
         let allowed = match need {
             Need::Any => true,
             Need::Notes | Need::Delete => user.role.can_write_notes(),
-            Need::Sign | Need::ConfirmChart | Need::DeleteSigned | Need::DeleteSignedRecording => {
-                user.role.can_sign()
-            }
+            Need::Sign | Need::ConfirmChart | Need::ConfirmDefaults => user.role.can_sign(),
+            Need::DeleteSigned | Need::DeleteSignedRecording => user.role.can_sign(),
             Need::Team | Need::Models | Need::Phone => user.role.can_manage_team(),
         };
         if !allowed {
@@ -1689,6 +1691,12 @@ impl App {
                 Need::ConfirmChart => {
                     format!(
                         "Only a veterinarian can confirm the tooth chart. {} is using OpenBark now.",
+                        user.name
+                    )
+                }
+                Need::ConfirmDefaults => {
+                    format!(
+                        "Only a veterinarian can confirm normal findings. {} is using OpenBark now.",
                         user.name
                     )
                 }
@@ -2707,7 +2715,9 @@ impl App {
                 "This note is signed, so it can't be changed. Add an addendum instead.".into(),
             ));
         }
-        let (run, note) = s.latest_note()?;
+        let (run, saved) = s.latest_saved()?;
+        let note = saved["note"].clone();
+        let pending_defaults = os_engine::defaults::pending_in(&saved);
         let template = s.run_template(&run)?;
         let title = template.heading_title(&request.heading).ok_or_else(|| {
             AppError(format!("{} has no heading called {}.", template.template.name, request.heading))
@@ -2744,6 +2754,7 @@ impl App {
             }
             let options = NoteOptions {
                 control: Some(control.clone()),
+                pending_defaults: pending_defaults.clone(),
                 ..self.note_options(&s, request.language.clone())
             };
             events.progress(&Progress::new(Stage::ReadTranscript, 0.0, transcript.segments.len() as f32));
@@ -2824,7 +2835,8 @@ impl App {
                 "This note is signed, so it can't be changed. Add an addendum instead.".into(),
             ));
         }
-        let (run, note) = s.latest_note()?;
+        let (run, saved) = s.latest_saved()?;
+        let note = saved["note"].clone();
         let mut template = s.run_template(&run)?;
         if let Some(chosen) = dentition.map(str::trim).filter(|d| !d.is_empty()) {
             template = Self::with_chosen_dentition(&template, heading, chosen, &value)?;
@@ -2832,6 +2844,11 @@ impl App {
         let transcript = s.load_transcript()?;
         let mut result =
             os_engine::edit::apply_edit(&template, &transcript, &note, heading, value, &who.name, &run.llm)?;
+        // Normal findings from the template still waiting carry over; one
+        // whose system the vet has now written about is dropped (ADR-0032).
+        let pending = os_engine::defaults::pending_in(&saved);
+        result.template_defaults =
+            os_engine::defaults::undiscussed(&template, &mut result.note, None, pending);
         result.by = Some(who);
         if let Some(e) = result.edit.as_mut() {
             e.from_run = Some(run.dir.clone());
@@ -2879,6 +2896,62 @@ impl App {
             )));
         }
         Ok(template.with_dentition(heading, d)?)
+    }
+
+    /// Confirm or remove normal findings from the template waiting in the
+    /// latest draft (ADR-0032). Confirming needs a veterinarian: the line
+    /// becomes their own in the note. Removing is a hand edit. Either way the
+    /// result is a new draft; the earlier one is kept.
+    pub fn settle_defaults(
+        &self,
+        id: &str,
+        request: &os_engine::defaults::SettleRequest,
+        by: &str,
+        pet: Option<&str>,
+    ) -> Result<NoteResponse> {
+        let _work = self.begin_work()?;
+        let need = if request.confirm { Need::ConfirmDefaults } else { Need::Notes };
+        let who = self
+            .who(Some(by), need)?
+            .ok_or_else(|| AppError("Add your name in Settings, then try again.".into()))?;
+        let _lock = self.lock_visit(id, Holder::Saving)?;
+        let mut s = self.open(id, pet)?;
+        if s.is_signed() {
+            return Err(AppError(
+                "This note is signed, so it can't be changed. Add an addendum instead.".into(),
+            ));
+        }
+        let (run, saved) = s.latest_saved()?;
+        let template = s.run_template(&run)?;
+        let transcript = s.load_transcript()?;
+        let pending = os_engine::defaults::pending_in(&saved);
+        let mut result = os_engine::defaults::settle(
+            &template,
+            &transcript,
+            &saved["note"],
+            &pending,
+            request,
+            &who.name,
+            &run.llm,
+        )?;
+        tracing::info!(
+            confirmed = request.confirm,
+            settled = pending.len() - result.template_defaults.len(),
+            waiting = result.template_defaults.len(),
+            "normal findings settled"
+        );
+        result.by = Some(who);
+        if let Some(e) = result.edit.as_mut() {
+            e.from_run = Some(run.dir.clone());
+            e.from_run_id = Some(run.id().to_string());
+        }
+        result.markdown = with_header(&s, &result.markdown);
+        s.save_run("edited", &result, &template)?;
+        Ok(NoteResponse {
+            markdown: result.markdown.clone(),
+            run: serde_json::to_value(&result)?,
+            notice: None,
+        })
     }
 
     /// Add a signed addendum to a signed note.
@@ -3700,6 +3773,8 @@ impl App {
             .into_iter()
             // The GPU recognisers come with the GPU speech pack, not one by one.
             .filter(|m| m.id != os_engine::models::GPU_STT && m.id != os_engine::models::GPU_SECOND_STT)
+            // Canary only when a spoken language uses it (ADR-0033).
+            .filter(|m| os_engine::models::offered(&m.id))
             // A phone lists mobile models only; a computer doesn't list the
             // ones made for small phones (ADR-0018 section 10).
             .filter(|m| if phone { m.mobile } else { !PHONE_ONLY.contains(&m.id.as_str()) })
@@ -3764,6 +3839,10 @@ impl App {
         let catalog = hub::full_catalog(&self.store);
         let entry =
             catalog.get(id).ok_or_else(|| AppError(format!("No model called {id} in the catalog.")))?;
+        // Canary is in the catalogue only for the French eval (ADR-0033).
+        if !os_engine::models::offered(id) {
+            return Err(AppError(NOT_OFFERED.into()));
+        }
         // Gigabytes that could never write a note here.
         if self.phone_tier().is_some() {
             if !entry.mobile {
@@ -4327,6 +4406,8 @@ enum Need {
     Sign,
     /// Confirm drafted tooth chart entries against the recording (veterinarian).
     ConfirmChart,
+    /// Confirm normal findings from the template (veterinarian; ADR-0032).
+    ConfirmDefaults,
     Team,
     /// Remove or add models and engine packs, or change the Hugging Face
     /// token, in web mode with a team (veterinarian; ADR-0025 §8-10).
